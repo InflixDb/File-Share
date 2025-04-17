@@ -1,93 +1,107 @@
+# bot.py
 import logging
-import requests
-from datetime import datetime, timedelta
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-import os
+from telegram.ext import Updater, CommandHandler, CallbackContext
+from telethon.sync import TelegramClient
+from config import TELEGRAM_BOT_TOKEN, API_ID, API_HASH, FORCE_CHANNEL
+from database import add_user, get_user, update_subscription, get_admins, add_admin, remove_admin, add_filter, get_filter
 
-# Enable logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
+# Set up logging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Premium Database (in-memory, can be replaced with SQLite/JSON for persistence)
-premium_db = {}
+# Set up Telethon client for channel management
+client = TelegramClient('anon', API_ID, API_HASH)
 
-# Get API Tokens from config.py
-from config import BITLY_TOKEN, TELEGRAM_BOT_TOKEN, ADMIN_USER_ID
+# Command: Start
+def start(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    user = get_user(user_id)
 
-# Shorten Link using Bitly API
-def shorten_link(long_url):
-    headers = {
-        "Authorization": f"Bearer {BITLY_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    data = {"long_url": long_url}
-    response = requests.post("https://api-ssl.bitly.com/v4/shorten", json=data, headers=headers)
-    return response.json().get("link", long_url)
+    if not user:
+        add_user(user_id)
 
-# Check if user is premium
-def is_premium(user_id):
-    if user_id not in premium_db:
-        return False
-    return datetime.strptime(premium_db[user_id], "%Y-%m-%d") >= datetime.now()
+    if check_subscription(update):
+        update.message.reply_text("Welcome to the bot!")
 
-# /add_premium Command: Admin can grant premium access
-def add_premium(update: Update, context: CallbackContext):
-    # Ensure admin is using this command
-    if update.message.from_user.id != ADMIN_USER_ID:  # Replace with your admin ID
+# Command: Request subscription
+def request_sub(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    update.message.reply_text(f"Please join our channel @YOUR_CHANNEL_NAME to proceed.")
+    
+# Command: Generate link
+def genlink(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    if not check_subscription(update):
+        return
+    
+    # Logic to generate a short URL for a file (Placeholder)
+    short_url = "https://short.link/example"
+    update.message.reply_text(f"Here is your short link: {short_url}")
+
+# Command: Broadcast message (Admin only)
+def batch(update: Update, context: CallbackContext):
+    if update.message.from_user.id not in get_admins():
         update.message.reply_text("You don't have permission to use this command.")
         return
-
-    if len(context.args) != 2:
-        update.message.reply_text("Usage: /add_premium <user_id> <days>")
+    
+    message = ' '.join(context.args)
+    if not message:
+        update.message.reply_text("Please provide a message to broadcast.")
         return
     
-    user_id = int(context.args[0])
-    days = int(context.args[1])
-    until = datetime.now() + timedelta(days=days)
+    # Broadcast the message to all users in the database
+    update.message.reply_text(f"Broadcasting: {message}")
+
+# Command: Add Admin (Admin only)
+def add_admin_cmd(update: Update, context: CallbackContext):
+    if update.message.from_user.id not in get_admins():
+        update.message.reply_text("You don't have permission to use this command.")
+        return
     
-    premium_db[user_id] = until.strftime("%Y-%m-%d")
-    update.message.reply_text(f"Premium access granted to {user_id} until {until.date()}.")
+    try:
+        new_admin_id = int(context.args[0])
+        add_admin(new_admin_id)
+        update.message.reply_text(f"User {new_admin_id} has been added as admin.")
+    except IndexError:
+        update.message.reply_text("Usage: /add_admin <user_id>")
 
-# Handle file requests and check premium status
-def handle_file_request(update: Update, context: CallbackContext):
+# Command: Set filter (Admin only)
+def set_filter(update: Update, context: CallbackContext):
+    if update.message.from_user.id not in get_admins():
+        update.message.reply_text("You don't have permission to use this command.")
+        return
+    
+    try:
+        anime_name = context.args[0]
+        link = context.args[1]
+        add_filter(anime_name, link)
+        update.message.reply_text(f"Filter set for {anime_name}. Link: {link}")
+    except IndexError:
+        update.message.reply_text("Usage: /set_filter <anime_name> <link>")
+
+# Function to check if user is subscribed to the channel
+async def check_subscription(update: Update):
     user_id = update.message.from_user.id
-    file_url = "https://yourfileserver.com/file123"  # Replace with actual file URL
+    try:
+        user = await client.get_participant(FORCE_CHANNEL, user_id)
+        return True
+    except:
+        return False
 
-    if is_premium(user_id):
-        update.message.reply_text(f"Here’s your direct file link:\n{file_url}")
-    else:
-        short_link = shorten_link(file_url)
-        update.message.reply_text(f"You need to verify before accessing the file:\n{short_link}")
-
-# /start Command: Send greeting message
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text("Welcome! Send any file or request a file to get started.")
-
-# /help Command: Show instructions
-def help_command(update: Update, context: CallbackContext):
-    update.message.reply_text("Use /add_premium <user_id> <days> to give premium access.\nSend a file to get a shortened link.")
-
-# Error Handler
-def error(update: Update, context: CallbackContext):
-    logger.warning(f"Update {update} caused error {context.error}")
-
+# Main function to start the bot
 def main():
-    # Set up the Updater and Dispatcher
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
-    # Add handlers
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("add_premium", add_premium))  # Premium command
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_file_request))  # Handle file requests
+    dp.add_handler(CommandHandler("requestsub", request_sub))
+    dp.add_handler(CommandHandler("genlink", genlink))
+    dp.add_handler(CommandHandler("batch", batch))
+    dp.add_handler(CommandHandler("add_admin", add_admin_cmd))
+    dp.add_handler(CommandHandler("set_filter", set_filter))
 
-    # Log errors
-    dp.add_error_handler(error)
-
-    # Start polling
+    # Start the bot
     updater.start_polling()
     updater.idle()
 
